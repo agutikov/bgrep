@@ -25,10 +25,12 @@
 // or implied, of the copyright holder.
 //
 
+#define _LARGEFILE64_SOURCE
+#include <sys/types.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -36,8 +38,9 @@
 #include <getopt.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <sys/mman.h>
 
-#define BGREP_VERSION "0.2"
+#define BGREP_VERSION "0.3"
 
 // The Windows/DOS implementation of read(3) opens files in text mode by default,
 // which means that an 0x1A byte is considered the end of the file unless a non-standard
@@ -47,6 +50,10 @@
 #endif
 
 int bytes_before = 0, bytes_after = 0;
+uint32_t block_size = 4096;
+uint32_t count_blocks = 0;
+uint32_t skip_blocks = 0;
+
 
 void die(const char* msg, ...);
 
@@ -76,103 +83,81 @@ int ascii2hex(char c)
 		return -1;
 }
 
-/* TODO: this will not work with STDIN or pipes
- * 	 we have to maintain a window of the bytes before which I am too lazy to do
- * 	 right now.
- */
-void dump_context(int fd, unsigned long long pos)
+void dump_context(unsigned char *mem, size_t size, unsigned long long pos, size_t len)
 {
-	off_t save_pos = lseek(fd, 0, SEEK_CUR);
+    int _bytes_before = (bytes_before <= pos) ? bytes_before : pos;
+    int _bytes_after = (bytes_after <= (size - pos - len)) ? bytes_after : (size - pos - len);
 
-	if (save_pos == (off_t)-1)
-	{
-		perror("lseek");
-		return; /* this one is not fatal*/
-	}
+    unsigned char *ptr = &mem[pos - _bytes_before];
 
-	char buf[1024];
-	off_t start = pos - bytes_before;
-	int bytes_to_read = bytes_before + bytes_after;
+    size_t i;
+    for (i = 0; i < _bytes_before; i++) {
+        print_char(*ptr);
+        ptr++;
+    }
+    for (i = 0; i < len; i++) {
+        print_char(*ptr);
+        ptr++;
+    }
+    for (i = 0; i < _bytes_after; i++) {
+        print_char(*ptr);
+        ptr++;
+    }
 
-	if (lseek(fd, start, SEEK_SET) == (off_t)-1)
-	{
-		perror("lseek");
-		return;
-	}
-
-	for (;bytes_to_read;)
-	{
-		int read_chunk = bytes_to_read > sizeof(buf) ? sizeof(buf) : bytes_to_read;
-		int bytes_read = read(fd, buf, read_chunk);
-
-		if (bytes_to_read < 0)
-		{
-			perror("read");
-			die("Error reading context");
-		}
-
-		char* buf_end = buf + read_chunk;
-		char* p = buf;
-
-		for (; p < buf_end;p++)
-		{
-			print_char(*p);
-		}
-
-		bytes_to_read -= read_chunk;
-	}
-
-	putchar('\n');
-
-	if (lseek(fd, save_pos, SEEK_SET) == (off_t)-1)
-	{
-		perror("lseek");
-		die("Could not restore the original file offset while printing context");
-	}
+    putchar('\n');
 }
 
-void searchfile(const char *filename, int fd, const unsigned char *value, const unsigned char *mask, int len)
+void searchfile(const char *filename, int fd, const unsigned char *value, const unsigned char *mask, size_t len)
 {
-	off_t offset = 0;
-	unsigned char buf[1024];
+    off_t offset = 0;
+    struct stat sb;
+    size_t pos;
+    off64_t mmap_off = 0;
+    size_t length = 0;
 
-	len--;
+    if (skip_blocks || count_blocks)
+    {
+        mmap_off = block_size * skip_blocks;
+        length = block_size * count_blocks;
+    } else
+    {
+        int ret = fstat(fd, &sb);
+        if (ret) 
+        {
+            perror("fstat failed\n");
+            exit(6);
+        }
+        length = sb.st_size;
+    }
+    unsigned char *memblock = mmap64(0, length, PROT_READ, MAP_SHARED, fd, mmap_off);
+    if (!memblock) {
+        perror("mmap64 failed\n");
+        exit(5);
+    }
 
-	while (1)
-	{
-		int r;
+    for (pos = 0; pos < length; pos++) 
+    {
+        size_t i = 0;
+        for (; i < len; i++)
+            if ((memblock[pos + i] & mask[i]) != value[i])
+                break;
 
-		memmove(buf, buf + sizeof(buf) - len, len);
-		r = read(fd, buf + len, sizeof(buf) - len);
-
-		if (r < 0)
-		{
-			perror("read");
-			return;
-		} else if (!r)
-			return;
-
-		int o, i;
-		for (o = offset ? 0 : len; o < r; ++o)
-		{
-			for (i = 0; i <= len; ++i)
-				if ((buf[o + i] & mask[i]) != value[i])
-					break;
-			if (i > len)
-			{
-				unsigned long long pos = (unsigned long long)(offset + o - len);
-				printf("%s: %08llx\n", filename, pos);
-				if (bytes_before || bytes_after)
-					dump_context(fd, pos);
-			}
-		}
-
-		offset += r;
-
-	}
+        if (i == len)
+        {
+            printf("%s: %08lx\n", filename, pos);
+            if (bytes_before || bytes_after)
+                dump_context(memblock, length, pos, len);
+        }
+    }
+	
+	if (munmap(memblock, length)) 
+    {
+        perror("munmap failed\n");
+        exit(4);
+    }
 }
 
-void recurse(const char *path, const unsigned char *value, const unsigned char *mask, int len)
+void recurse(const char *path, const unsigned char *value, const unsigned char *mask, size_t len)
 {
 	struct stat s;
 	if (stat(path, &s))
@@ -191,7 +176,10 @@ void recurse(const char *path, const unsigned char *value, const unsigned char *
 			close(fd);
 		}
 		return;
-	}
+	} else if (count_blocks || skip_blocks) 
+    {
+        fprintf(stderr, "can't use --count or --skip recursively for directory\n");
+    }
 
 	DIR *dir = opendir(path);
 	if (!dir)
@@ -228,7 +216,7 @@ void die(const char* msg, ...)
 void usage(char** argv)
 {
 	fprintf(stderr, "bgrep version: %s\n", BGREP_VERSION);
-	fprintf(stderr, "usage: %s [-B bytes] [-A bytes] [-C bytes] <hex> [<path> [...]]\n", *argv);
+	fprintf(stderr, "usage: %s [-B bytes] [-A bytes] [-C bytes] <hex> [<path> [...]] [--bs <block_size>] [--count <count_blocks>] [--skip <skip_blocks>]\n", *argv);
 	exit(1);
 }
 
@@ -236,7 +224,21 @@ void parse_opts(int argc, char** argv)
 {
 	int c;
 
-	while ((c = getopt(argc, argv, "A:B:C:")) != -1)
+    static struct option long_options[] =
+    {
+        {"after-context",  required_argument,       0, 'A'},
+        {"before-context", required_argument,     0, 'B'},
+        {"context",    required_argument,     0, 'C'},
+        {"bs",    required_argument,     0, 0},
+        {"count",    required_argument,     0, 1},
+        {"skip",    required_argument,     0, 2},
+
+        {0, 0, 0, 0}
+    };
+
+    int option_index = 0;
+
+    while ((c = getopt_long(argc, argv, "A:B:C:", long_options, &option_index)) != -1)
 	{
 		switch (c)
 		{
@@ -249,6 +251,15 @@ void parse_opts(int argc, char** argv)
 			case 'C':
 				bytes_before = bytes_after = atoi(optarg);
 				break;
+            case 0:
+                block_size = atoi(optarg);
+                break;
+            case 1:
+                count_blocks = atoi(optarg);
+                break;
+            case 2:
+                skip_blocks = atoi(optarg);
+                break;
 			default:
 				usage(argv);
 		}
@@ -263,7 +274,7 @@ void parse_opts(int argc, char** argv)
 int main(int argc, char **argv)
 {
 	unsigned char value[0x100], mask[0x100];
-	int len = 0;
+	size_t len = 0;
 
 	if (argc < 2)
 	{
