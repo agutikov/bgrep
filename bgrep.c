@@ -144,7 +144,7 @@ void searchfile(const char *filename, int fd, const unsigned char *value, const 
 
         if (i == len)
         {
-            printf("%s: %08lx\n", filename, pos);
+            printf("%s: 0x%08lx\n", filename, pos);
             if (bytes_before || bytes_after)
                 dump_context(memblock, length, pos, len);
         }
