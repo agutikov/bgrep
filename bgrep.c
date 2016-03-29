@@ -282,7 +282,9 @@ void parse_opts(int argc, char** argv)
 
 int main(int argc, char **argv)
 {
-	unsigned char value[0x100], mask[0x100];
+	unsigned char value_buffer[0x100 + 13] = "bgrep_buffer:";
+	unsigned char mask[0x100];
+    unsigned char* value = &value_buffer[13];
 	size_t len = 0;
 
 	if (argc < 2)
