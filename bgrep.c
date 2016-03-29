@@ -53,16 +53,21 @@ int bytes_before = 0, bytes_after = 0;
 uint32_t block_size = 4096;
 uint32_t count_blocks = 0;
 uint32_t skip_blocks = 0;
+int hex_context = 0;
 
 
 void die(const char* msg, ...);
 
 void print_char(unsigned char c)
 {
-	if (isprint(c))
-		putchar(c);
-	else
-		printf("\\x%02x", (int)c);
+    if (!hex_context) {
+        if (isprint(c))
+            putchar(c);
+        else
+            printf("\\x%02x", (int)c);
+    } else {
+        printf("%02x", (int)c);
+    }
 }
 
 int ascii2hex(char c)
@@ -216,7 +221,7 @@ void die(const char* msg, ...)
 void usage(char** argv)
 {
 	fprintf(stderr, "bgrep version: %s\n", BGREP_VERSION);
-	fprintf(stderr, "usage: %s [-B bytes] [-A bytes] [-C bytes] <hex> [<path> [...]] [--bs <block_size>] [--count <count_blocks>] [--skip <skip_blocks>]\n", *argv);
+	fprintf(stderr, "usage: %s [-B bytes] [-A bytes] [-C bytes] <hex> [<path> [...]] [--bs <block_size>] [--count <count_blocks>] [--skip <skip_blocks>] [-x]\n", *argv);
 	exit(1);
 }
 
@@ -232,13 +237,14 @@ void parse_opts(int argc, char** argv)
         {"bs",    required_argument,     0, 0},
         {"count",    required_argument,     0, 1},
         {"skip",    required_argument,     0, 2},
+        {"hex-context",    no_argument,     0, 'x'},
 
         {0, 0, 0, 0}
     };
 
     int option_index = 0;
 
-    while ((c = getopt_long(argc, argv, "A:B:C:", long_options, &option_index)) != -1)
+    while ((c = getopt_long(argc, argv, "xA:B:C:", long_options, &option_index)) != -1)
 	{
 		switch (c)
 		{
@@ -259,6 +265,9 @@ void parse_opts(int argc, char** argv)
                 break;
             case 2:
                 skip_blocks = atoi(optarg);
+                break;
+            case 'x':
+                hex_context = 1;
                 break;
 			default:
 				usage(argv);
